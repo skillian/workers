@@ -2,8 +2,11 @@ package workers
 
 import (
 	"context"
+	"errors"
 	"sync"
 )
+
+var ErrInvalidWorkerCount = errors.New("worker count must be >0")
 
 // Worker functions are passed into the Work function to process work
 // requests in separate goroutines.
@@ -44,6 +47,15 @@ func Work[TRequest any, TResult any](ctx context.Context, requests chan TRequest
 		opt(&wc)
 	}
 	var results chan WorkResult[TResult]
+	if wc.numWorkers <= 0 {
+		go func() {
+			defer close(results)
+			results <- WorkResult[TResult]{
+				Err: ErrInvalidWorkerCount,
+			}
+		}()
+		return results
+	}
 	if wc.channelCap > 0 {
 		results = make(chan WorkResult[TResult], wc.channelCap)
 	} else {
@@ -54,18 +66,20 @@ func Work[TRequest any, TResult any](ctx context.Context, requests chan TRequest
 	for i := 0; i < wc.numWorkers; i++ {
 		go func(workerId int) {
 			defer wg.Done()
-			select {
-			case req, ok := <-requests:
-				if !ok {
+			for {
+				select {
+				case req, ok := <-requests:
+					if !ok {
+						return
+					}
+					res, err := worker(ctx, req)
+					results <- WorkResult[TResult]{
+						Res: res,
+						Err: err,
+					}
+				case <-ctx.Done():
 					return
 				}
-				res, err := worker(ctx, req)
-				results <- WorkResult[TResult]{
-					Res: res,
-					Err: err,
-				}
-			case <-ctx.Done():
-				return
 			}
 		}(i)
 	}
